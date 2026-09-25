@@ -462,17 +462,24 @@ static std::wstring PickRealMic() {
     for (auto& d : ListDevices(eCapture)) if (!IContains(d.name, L"CABLE")) return d.id;
     return L"";
 }
-static void TurnOn() {
-    if (g_on) return;
+// The heavy work (device probing, engine start, default-device switch) runs on a worker thread so the
+// tray icon flips instantly. WM_RESULT brings the outcome back to the UI thread.
+#define WM_RESULT (WM_APP + 3)
+static std::thread g_worker;
+static std::atomic<bool> g_busy{ false };
+static void PostResult(bool ok, const std::wstring& msg) { PostMessageW(g_hwnd, WM_RESULT, ok ? 1 : 0, (LPARAM)new std::wstring(msg)); }
+
+static void DoOn() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     std::wstring cableOut = FindDevice(eCapture, g_cableOut), cableIn = FindDevice(eRender, g_cableIn);
     if (cableOut.empty() || cableIn.empty()) {
         Log(L"VB-CABLE not found");
-        UpdateTray(L"VB-CABLE is not installed (or needs a reboot). Run install-cable.cmd in the tool folder as administrator.");
-        return;
+        PostResult(false, L"VB-CABLE is not installed (or needs a reboot). Run install-cable.cmd in the tool folder as administrator.");
+        CoUninitialize(); return;
     }
     std::wstring cur = DefaultCapture();
     g_prevMic = (cur.empty() || IsCable(cur)) ? PickRealMic() : cur;
-    if (g_prevMic.empty()) { UpdateTray(L"No real microphone found."); return; }
+    if (g_prevMic.empty()) { PostResult(false, L"No real microphone found."); CoUninitialize(); return; }
     SaveState(g_prevMic);
     UnmuteFull(cableIn); UnmuteFull(cableOut);
     // voice source: the configured mic (e.g. a noise-cancelling virtual mic) if present, else the previous default
@@ -482,24 +489,41 @@ static void TurnOn() {
         UnmuteFull(voice);
         if (voice != g_prevMic) {
             // a virtual mic whose app is not running gives digital zeros: fall back to the real mic in that case
-            float pv = ProbeMic(voice, 1500), pp = pv > 0.f ? 1.f : ProbeMic(g_prevMic, 1000);
+            float pv = ProbeMic(voice, 700), pp = pv > 0.f ? 1.f : ProbeMic(g_prevMic, 500);
             if (pv <= 0.f && pp > 0.f) { Log(L"configured mic " + NameOf(voice) + L" is silent, using " + NameOf(g_prevMic)); voice = g_prevMic; }
         }
     }
     g_engine.start(voice, cableIn);
     for (int i = 0; i < 150 && g_engine.running && g_engine.lastError.empty(); i++) Sleep(20);
-    if (!g_engine.running || !g_engine.lastError.empty()) { std::wstring e = g_engine.lastError; g_engine.stop(); UpdateTray((L"Could not start: " + e).c_str()); return; }
+    if (!g_engine.running || !g_engine.lastError.empty()) { std::wstring e = g_engine.lastError; g_engine.stop(); PostResult(false, L"Could not start: " + e); CoUninitialize(); return; }
     if (!SetDefaultDevice(cableOut)) Log(L"warning: could not set default mic to cable");
-    g_on = true; Log(L"ON: mic=" + NameOf(g_prevMic) + L" -> cable; default mic switched");
-    UpdateTray(L"ON - everything you hear (except Discord) now goes into your mic.");
+    Log(L"ON: voice=" + NameOf(voice) + L" -> cable; default mic switched (was " + NameOf(g_prevMic) + L")");
+    PostResult(true, L"ON - everything you hear (except Discord) now goes into your mic.");
+    CoUninitialize();
 }
-static void TurnOff(bool quiet = false) {
-    if (!g_on) return;
-    g_on = false;
+static void DoOff() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (!g_prevMic.empty()) SetDefaultDevice(g_prevMic);
     g_engine.stop();
     Log(L"OFF: default mic restored to " + NameOf(g_prevMic));
-    if (!quiet) UpdateTray(L"OFF - microphone back to normal.");
+    CoUninitialize();
+}
+static void JoinWorker() { if (g_worker.joinable()) g_worker.join(); g_busy = false; }
+static void TurnOn() {
+    if (g_on || g_busy) return;
+    JoinWorker();
+    g_on = true; g_busy = true; UpdateTray();          // icon flips immediately
+    g_worker = std::thread(DoOn);
+}
+static void TurnOff(bool quiet = false) {
+    if (!g_on || g_busy) return;
+    JoinWorker();
+    g_on = false; g_busy = true; if (!quiet) UpdateTray(L"OFF - microphone back to normal."); else UpdateTray();
+    g_worker = std::thread([] { DoOff(); PostResult(true, L""); });
+}
+static void ShutdownSync() {                           // exit / logoff: finish any pending work, restore the mic
+    JoinWorker();
+    if (g_on) { g_on = false; DoOff(); }
 }
 static void RestoreIfLeftover() {
     std::wstring cur = DefaultCapture();
@@ -558,8 +582,13 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_EXIT: DestroyWindow(h); break;
         }
         return 0;
-    case WM_QUERYENDSESSION: TurnOff(true); return TRUE;
-    case WM_DESTROY: TurnOff(true); Shell_NotifyIconW(NIM_DELETE, &g_nid); PostQuitMessage(0); return 0;
+    case WM_RESULT: {
+        std::wstring* msg = (std::wstring*)lp; g_busy = false;
+        if (!wp) g_on = false;
+        UpdateTray(msg && !msg->empty() ? msg->c_str() : nullptr); delete msg; return 0;
+    }
+    case WM_QUERYENDSESSION: ShutdownSync(); return TRUE;
+    case WM_DESTROY: ShutdownSync(); Shell_NotifyIconW(NIM_DELETE, &g_nid); PostQuitMessage(0); return 0;
     default:
         if (msg == taskbarCreated) { Shell_NotifyIconW(NIM_ADD, &g_nid); Shell_NotifyIconW(NIM_SETVERSION, &g_nid); UpdateTray(); }
     }
