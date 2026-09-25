@@ -1,6 +1,9 @@
-# Music to mic settings (edit, then restart the tray app)
-# how loud the PC sound is in your mic (0.0 - 1.0). 0.5 = half, so your voice stays on top
-music_gain=0.5
+# Music to mic settings (changes are picked up within 2 s while running)
+# music level in the call, dB RMS. Speech in Discord sits around -18..-20 dB, so -24 keeps music just under the voices.
+# Raise to -20 for louder music, set 0 to disable auto-levelling (then music_gain is a fixed multiplier).
+music_target_db=-24
+# maximum boost the auto-leveller may apply (or the fixed gain when music_target_db=0)
+music_gain=4
 # your own voice level
 mic_gain=1.0
 # this program's sound is NOT sent to the mic, so people in the call never hear themselves

@@ -56,7 +56,9 @@ class DECLSPEC_UUID("870af99c-171d-4f9e-af0d-e63df40c2bc9") CPolicyConfigClient;
 // ---------- globals / config ----------
 static std::wstring g_dir;            // folder of the exe
 static std::wstring g_exePath;
-static float g_musicGain = 0.5f, g_micGain = 1.0f;
+static float g_musicGain = 4.0f, g_micGain = 1.0f;   // music_gain = fixed gain, or the max gain when auto-levelling
+static float g_musicTargetDb = -24.f;                   // 0 = no auto-levelling
+static FILETIME g_cfgTime = {};
 static std::wstring g_excludeProc = L"Discord.exe";
 static std::wstring g_micName;        // voice source; empty = whatever mic is default when switching ON
 // VB-CABLE 4.5 names its playback side "Speakers (VB-Audio Virtual Cable)", older versions "CABLE Input"
@@ -79,6 +81,7 @@ static std::wstring Trim(const std::wstring& s) {
     return a == std::wstring::npos ? L"" : s.substr(a, b - a + 1);
 }
 static void LoadConfig() {
+    { WIN32_FILE_ATTRIBUTE_DATA fa; if (GetFileAttributesExW((g_dir + L"config.txt").c_str(), GetFileExInfoStandard, &fa)) g_cfgTime = fa.ftLastWriteTime; }
     std::wifstream f(g_dir + L"config.txt");
     std::wstring line;
     while (std::getline(f, line)) {
@@ -89,6 +92,7 @@ static void LoadConfig() {
         std::wstring k = Trim(line.substr(0, eq)), v = Trim(line.substr(eq + 1));
         if (k == L"music_gain") g_musicGain = (float)_wtof(v.c_str());
         else if (k == L"mic_gain") g_micGain = (float)_wtof(v.c_str());
+        else if (k == L"music_target_db") g_musicTargetDb = (float)_wtof(v.c_str());
         else if (k == L"exclude_process") g_excludeProc = v;
         else if (k == L"mic") g_micName = v;
         else if (k == L"cable_playback") g_cableIn = v;
@@ -96,6 +100,7 @@ static void LoadConfig() {
         else if (k == L"verbose") g_verbose = (v == L"1" || v == L"true");
     }
 }
+static bool ConfigChanged() { WIN32_FILE_ATTRIBUTE_DATA fa; return GetFileAttributesExW((g_dir + L"config.txt").c_str(), GetFileExInfoStandard, &fa) && CompareFileTime(&fa.ftLastWriteTime, &g_cfgTime) != 0; }
 static bool IEquals(const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) == 0; }
 static bool IContains(const std::wstring& hay, const std::wstring& needle) {
     std::wstring h = hay, n = needle;
@@ -362,6 +367,7 @@ private:
             const UINT32 maxQueue = rate * 120 / 1000;    // never let a source lag more than 120 ms
             ULONGLONG lastCheck = GetTickCount64(), lastStat = lastCheck;
             double micE = 0, loopE = 0; size_t nE = 0;
+            float env = 0.f, musicG = g_musicTargetDb != 0.f ? 1.f : g_musicGain;   // auto-level state
             while (running) {
                 mic.drain(micRing, tmp); loop.drain(loopRing, tmp);
                 micRing.trimTo(maxQueue); loopRing.trimTo(maxQueue);
@@ -376,8 +382,15 @@ private:
                         mixA.resize((size_t)n * ch); mixB.resize((size_t)n * ch);
                         micRing.pop(mixA.data(), n); loopRing.pop(mixB.data(), n);
                         float* o = (float*)out;
+                        if (g_musicTargetDb != 0.f) {
+                            // auto-level the music: fast attack, slow release, capped at music_gain
+                            double e = 0; for (float b : mixB) e += (double)b * b; float rmsBlk = (float)sqrt(e / mixB.size());
+                            env = env * 0.9f + rmsBlk * 0.1f;
+                            float want = std::min(g_musicGain, powf(10.f, g_musicTargetDb / 20.f) / std::max(env, 1e-5f));
+                            musicG += (want - musicG) * (want < musicG ? 0.3f : 0.01f);
+                        } else musicG = g_musicGain;
                         for (size_t i = 0; i < mixA.size(); i++) {
-                            float v = mixA[i] * g_micGain + mixB[i] * g_musicGain;
+                            float v = mixA[i] * g_micGain + mixB[i] * musicG;
                             if (g_verbose) { micE += mixA[i] * mixA[i]; loopE += mixB[i] * mixB[i]; nE++; }
                             o[i] = v > 1.f ? 1.f : (v < -1.f ? -1.f : v);
                         }
@@ -387,6 +400,7 @@ private:
                 ULONGLONG now = GetTickCount64();
                 if (now - lastCheck > 2000) {
                     lastCheck = now;
+                    if (ConfigChanged()) { LoadConfig(); Log(L"config reloaded"); }
                     DWORD root = FindRootProcess(g_excludeProc);
                     if ((root && root != excludePid) || (!root && excludePid != GetCurrentProcessId()) || !ProcessAlive(excludePid)) {
                         Log(L"excluded process changed, reopening loopback");
@@ -394,7 +408,7 @@ private:
                     }
                 }
                 if (g_verbose && now - lastStat > 5000 && nE) {
-                    wchar_t b[160]; swprintf_s(b, L"levels mic %.1f dB  music %.1f dB  queue mic %zu loop %zu", 10 * log10(micE / nE + 1e-12), 10 * log10(loopE / nE + 1e-12), micRing.count, loopRing.count);
+                    wchar_t b[160]; swprintf_s(b, L"levels mic %.1f dB  music %.1f dB (gain x%.2f)  queue mic %zu loop %zu", 10 * log10(micE / nE + 1e-12), 10 * log10(loopE / nE + 1e-12), musicG, micRing.count, loopRing.count);
                     Log(b); micE = loopE = 0; nE = 0; lastStat = now;
                 }
                 Sleep(4);
