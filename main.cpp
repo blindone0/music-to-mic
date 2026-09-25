@@ -167,6 +167,32 @@ static void UnmuteFull(const std::wstring& id) {
     if (SUCCEEDED(d->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, &v))) { v->SetMute(FALSE, nullptr); v->SetMasterVolumeLevelScalar(1.0f, nullptr); }
 }
 
+// Peak level of a capture device over `ms` milliseconds (0 = digital silence / could not open). Used to skip a dead mic.
+static float ProbeMic(const std::wstring& id, int ms) {
+    auto d = GetDevice(id); if (!d) return 0.f;
+    ComPtr<IAudioClient> ac; if (FAILED(d->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &ac))) return 0.f;
+    WAVEFORMATEX* f = nullptr; if (FAILED(ac->GetMixFormat(&f))) return 0.f;
+    bool isFloat = f->wFormatTag == WAVE_FORMAT_IEEE_FLOAT || (f->wFormatTag == WAVE_FORMAT_EXTENSIBLE && ((WAVEFORMATEXTENSIBLE*)f)->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
+    float peak = 0.f;
+    if (isFloat && SUCCEEDED(ac->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 5000000, 0, f, nullptr))) {
+        ComPtr<IAudioCaptureClient> cc;
+        if (SUCCEEDED(ac->GetService(IID_PPV_ARGS(&cc))) && SUCCEEDED(ac->Start())) {
+            ULONGLONG until = GetTickCount64() + ms;
+            while (GetTickCount64() < until) {
+                Sleep(10); UINT32 pkt = 0;
+                while (SUCCEEDED(cc->GetNextPacketSize(&pkt)) && pkt > 0) {
+                    BYTE* data; UINT32 frames; DWORD flags;
+                    if (FAILED(cc->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
+                    if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT)) { const float* s = (const float*)data; for (UINT32 i = 0; i < frames * f->nChannels; i++) peak = std::max(peak, fabsf(s[i])); }
+                    cc->ReleaseBuffer(frames);
+                }
+            }
+            ac->Stop();
+        }
+    }
+    CoTaskMemFree(f); return peak;
+}
+
 // ---------- process helpers ----------
 static DWORD FindRootProcess(const std::wstring& exeName) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -451,7 +477,15 @@ static void TurnOn() {
     UnmuteFull(cableIn); UnmuteFull(cableOut);
     // voice source: the configured mic (e.g. a noise-cancelling virtual mic) if present, else the previous default
     std::wstring voice = g_micName.empty() ? L"" : FindDevice(eCapture, g_micName);
-    if (voice.empty() || IsCable(voice)) voice = g_prevMic; else UnmuteFull(voice);
+    if (voice.empty() || IsCable(voice)) voice = g_prevMic;
+    else {
+        UnmuteFull(voice);
+        if (voice != g_prevMic) {
+            // a virtual mic whose app is not running gives digital zeros: fall back to the real mic in that case
+            float pv = ProbeMic(voice, 1500), pp = pv > 0.f ? 1.f : ProbeMic(g_prevMic, 1000);
+            if (pv <= 0.f && pp > 0.f) { Log(L"configured mic " + NameOf(voice) + L" is silent, using " + NameOf(g_prevMic)); voice = g_prevMic; }
+        }
+    }
     g_engine.start(voice, cableIn);
     for (int i = 0; i < 150 && g_engine.running && g_engine.lastError.empty(); i++) Sleep(20);
     if (!g_engine.running || !g_engine.lastError.empty()) { std::wstring e = g_engine.lastError; g_engine.stop(); UpdateTray((L"Could not start: " + e).c_str()); return; }
