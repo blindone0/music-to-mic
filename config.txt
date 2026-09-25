@@ -1,0 +1,12 @@
+# Music to mic settings (edit, then restart the tray app)
+# how loud the PC sound is in your mic (0.0 - 1.0). 0.5 = half, so your voice stays on top
+music_gain=0.5
+# your own voice level
+mic_gain=1.0
+# this program's sound is NOT sent to the mic, so people in the call never hear themselves
+exclude_process=Discord.exe
+# VB-CABLE device names (leave as is)
+cable_playback=CABLE Input
+cable_recording=CABLE Output
+# 1 = write mic/music levels to the log every 5 s (for troubleshooting)
+verbose=0

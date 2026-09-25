@@ -1,0 +1,7 @@
+vbcable/
+*.zip
+*.obj
+*.log
+state.txt
+config.bak
+
