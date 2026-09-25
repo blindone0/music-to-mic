@@ -5,8 +5,8 @@ music_gain=0.5
 mic_gain=1.0
 # this program's sound is NOT sent to the mic, so people in the call never hear themselves
 exclude_process=Discord.exe
-# VB-CABLE device names (leave as is)
-cable_playback=CABLE Input
+# VB-CABLE device names (leave as is). Several alternatives can be separated with |
+cable_playback=CABLE Input|Speakers (VB-Audio Virtual Cable)
 cable_recording=CABLE Output
 # 1 = write mic/music levels to the log every 5 s (for troubleshooting)
 verbose=0

@@ -58,7 +58,8 @@ static std::wstring g_dir;            // folder of the exe
 static std::wstring g_exePath;
 static float g_musicGain = 0.5f, g_micGain = 1.0f;
 static std::wstring g_excludeProc = L"Discord.exe";
-static std::wstring g_cableIn = L"CABLE Input", g_cableOut = L"CABLE Output";
+// VB-CABLE 4.5 names its playback side "Speakers (VB-Audio Virtual Cable)", older versions "CABLE Input"
+static std::wstring g_cableIn = L"CABLE Input|Speakers (VB-Audio Virtual Cable)", g_cableOut = L"CABLE Output";
 static bool g_verbose = false;
 static std::mutex g_logMx;
 
@@ -124,8 +125,17 @@ static std::vector<DevInfo> ListDevices(EDataFlow flow) {
     }
     return out;
 }
+// nameSub may hold several alternatives separated by '|', tried in order
 static std::wstring FindDevice(EDataFlow flow, const std::wstring& nameSub) {
-    for (auto& d : ListDevices(flow)) if (IContains(d.name, nameSub)) return d.id;
+    auto devs = ListDevices(flow);
+    size_t start = 0;
+    while (start <= nameSub.size()) {
+        size_t bar = nameSub.find(L'|', start);
+        std::wstring part = Trim(nameSub.substr(start, bar == std::wstring::npos ? std::wstring::npos : bar - start));
+        if (!part.empty()) for (auto& d : devs) if (IContains(d.name, part)) return d.id;
+        if (bar == std::wstring::npos) break;
+        start = bar + 1;
+    }
     return L"";
 }
 static std::wstring DefaultCapture() {
