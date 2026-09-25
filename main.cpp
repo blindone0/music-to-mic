@@ -58,6 +58,7 @@ static std::wstring g_dir;            // folder of the exe
 static std::wstring g_exePath;
 static float g_musicGain = 0.5f, g_micGain = 1.0f;
 static std::wstring g_excludeProc = L"Discord.exe";
+static std::wstring g_micName;        // voice source; empty = whatever mic is default when switching ON
 // VB-CABLE 4.5 names its playback side "Speakers (VB-Audio Virtual Cable)", older versions "CABLE Input"
 static std::wstring g_cableIn = L"CABLE Input|Speakers (VB-Audio Virtual Cable)", g_cableOut = L"CABLE Output";
 static bool g_verbose = false;
@@ -89,6 +90,7 @@ static void LoadConfig() {
         if (k == L"music_gain") g_musicGain = (float)_wtof(v.c_str());
         else if (k == L"mic_gain") g_micGain = (float)_wtof(v.c_str());
         else if (k == L"exclude_process") g_excludeProc = v;
+        else if (k == L"mic") g_micName = v;
         else if (k == L"cable_playback") g_cableIn = v;
         else if (k == L"cable_recording") g_cableOut = v;
         else if (k == L"verbose") g_verbose = (v == L"1" || v == L"true");
@@ -330,7 +332,7 @@ private:
             ok = true;
         } while (false);
         if (ok) {
-            const UINT32 target = rate * 40 / 1000;       // keep ~40 ms queued in the cable
+            const UINT32 target = rate * 20 / 1000;       // keep ~20 ms queued in the cable (low latency helps Discord's echo canceller)
             const UINT32 maxQueue = rate * 120 / 1000;    // never let a source lag more than 120 ms
             ULONGLONG lastCheck = GetTickCount64(), lastStat = lastCheck;
             double micE = 0, loopE = 0; size_t nE = 0;
@@ -447,7 +449,10 @@ static void TurnOn() {
     if (g_prevMic.empty()) { UpdateTray(L"No real microphone found."); return; }
     SaveState(g_prevMic);
     UnmuteFull(cableIn); UnmuteFull(cableOut);
-    g_engine.start(g_prevMic, cableIn);
+    // voice source: the configured mic (e.g. a noise-cancelling virtual mic) if present, else the previous default
+    std::wstring voice = g_micName.empty() ? L"" : FindDevice(eCapture, g_micName);
+    if (voice.empty() || IsCable(voice)) voice = g_prevMic; else UnmuteFull(voice);
+    g_engine.start(voice, cableIn);
     for (int i = 0; i < 150 && g_engine.running && g_engine.lastError.empty(); i++) Sleep(20);
     if (!g_engine.running || !g_engine.lastError.empty()) { std::wstring e = g_engine.lastError; g_engine.stop(); UpdateTray((L"Could not start: " + e).c_str()); return; }
     if (!SetDefaultDevice(cableOut)) Log(L"warning: could not set default mic to cable");
