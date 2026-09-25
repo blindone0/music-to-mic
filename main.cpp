@@ -489,8 +489,9 @@ static void DoOn() {
         UnmuteFull(voice);
         if (voice != g_prevMic) {
             // a virtual mic whose app is not running gives digital zeros: fall back to the real mic in that case
-            float pv = ProbeMic(voice, 700), pp = pv > 0.f ? 1.f : ProbeMic(g_prevMic, 500);
-            if (pv <= 0.f && pp > 0.f) { Log(L"configured mic " + NameOf(voice) + L" is silent, using " + NameOf(g_prevMic)); voice = g_prevMic; }
+            const float kSilent = 1e-4f; // about -80 dB: below this a mic is considered dead
+            float pv = ProbeMic(voice, 1000), pp = pv > kSilent ? 1.f : ProbeMic(g_prevMic, 500);
+            if (pv <= kSilent && pp > kSilent) { Log(L"configured mic " + NameOf(voice) + L" is silent, using " + NameOf(g_prevMic)); voice = g_prevMic; }
         }
     }
     g_engine.start(voice, cableIn);
